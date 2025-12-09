@@ -295,15 +295,21 @@ create_caddyfile() {
 {
     admin localhost:2019
     email $ssl_email
+    on_demand_tls {
+        ask http://localhost:3000/api/caddy/check
+    }
 }
 
-# Deployer dashboard on d.domain subdomain
+# Deployer dashboard
 d.$DEPLOYER_DOMAIN {
     reverse_proxy localhost:3000
 }
 
-# Wildcard for all apps (handled by deployer API)
-*.$DEPLOYER_DOMAIN {
+# On-demand TLS for app subdomains (no wildcard cert needed)
+https://*.$DEPLOYER_DOMAIN {
+    tls {
+        on_demand
+    }
     reverse_proxy localhost:3000
 }
 EOF
