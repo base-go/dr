@@ -346,8 +346,16 @@ Environment=DEPLOYER_CONFIG=$DEPLOYER_DIR/config/deployer.yaml
 WantedBy=multi-user.target
 EOF
 
-    # Caddy service (if not already managed by system)
-    if [ ! -f /etc/systemd/system/caddy.service ] && [ ! -f /lib/systemd/system/caddy.service ]; then
+    # Configure Caddy to use our Caddyfile
+    # If system Caddy service exists, copy our Caddyfile to /etc/caddy/
+    if [ -f /lib/systemd/system/caddy.service ] || [ -f /usr/lib/systemd/system/caddy.service ]; then
+        log "Using system Caddy service, updating /etc/caddy/Caddyfile..."
+        mkdir -p /etc/caddy
+        cp "$DEPLOYER_DIR/config/Caddyfile" /etc/caddy/Caddyfile
+        chown root:root /etc/caddy/Caddyfile
+        chmod 644 /etc/caddy/Caddyfile
+    else
+        # No system service, create our own
         cat > /etc/systemd/system/caddy.service <<EOF
 [Unit]
 Description=Caddy Web Server
