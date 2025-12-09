@@ -98,9 +98,12 @@ fi
 # Remove backup
 rm -f "$DEPLOYER_DIR/bin/deployer.bak"
 
-# Start service
-log "Starting deployer service..."
-systemctl start deployer
+# Restart services
+log "Restarting deployer service..."
+systemctl restart deployer
+
+log "Restarting caddy service..."
+systemctl restart caddy 2>/dev/null || true
 
 # Verify service is running
 sleep 2
