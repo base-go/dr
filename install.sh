@@ -39,6 +39,11 @@ log "Detected OS: $OS"
 
 # Interactive domain setup if not provided
 setup_domain() {
+    # Check if DEPLOYER_DOMAIN was passed via sudo
+    if [ -z "$DEPLOYER_DOMAIN" ] && [ -n "$SUDO_DEPLOYER_DOMAIN" ]; then
+        DEPLOYER_DOMAIN="$SUDO_DEPLOYER_DOMAIN"
+    fi
+
     if [ -n "$DEPLOYER_DOMAIN" ]; then
         log "Using domain: $DEPLOYER_DOMAIN"
         return
@@ -436,5 +441,63 @@ main() {
     start_services
     print_success
 }
+
+# Uninstall function
+uninstall() {
+    echo ""
+    echo -e "${RED}========================================${NC}"
+    echo -e "${RED}       Uninstalling Deployer           ${NC}"
+    echo -e "${RED}========================================${NC}"
+    echo ""
+
+    # Stop services
+    log "Stopping services..."
+    systemctl stop deployer 2>/dev/null || true
+    systemctl disable deployer 2>/dev/null || true
+
+    # Remove systemd service
+    log "Removing systemd service..."
+    rm -f /etc/systemd/system/deployer.service
+    systemctl daemon-reload
+
+    # Remove binary symlink
+    log "Removing binary..."
+    rm -f /usr/local/bin/deployer
+
+    # Ask about data
+    if [ -t 0 ]; then
+        ask "Remove all data and config? (y/N):"
+        read -r REMOVE_DATA
+    else
+        REMOVE_DATA="n"
+    fi
+
+    if [ "$REMOVE_DATA" = "y" ] || [ "$REMOVE_DATA" = "Y" ]; then
+        log "Removing data directory..."
+        rm -rf "$DEPLOYER_DIR"
+
+        # Remove user
+        log "Removing user..."
+        userdel -r "$DEPLOYER_USER" 2>/dev/null || true
+    else
+        warn "Keeping data directory: $DEPLOYER_DIR"
+        warn "Keeping user: $DEPLOYER_USER"
+    fi
+
+    echo ""
+    echo -e "${GREEN}Deployer uninstalled.${NC}"
+    echo ""
+    echo "Note: Caddy and Podman were NOT removed."
+    echo "To remove them manually:"
+    echo "  apt remove caddy podman  # Debian/Ubuntu"
+    echo "  dnf remove caddy podman  # Fedora/RHEL"
+    echo ""
+}
+
+# Check for uninstall argument
+if [ "${1:-}" = "uninstall" ] || [ "${1:-}" = "--uninstall" ]; then
+    uninstall
+    exit 0
+fi
 
 main "$@"
