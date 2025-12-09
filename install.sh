@@ -300,13 +300,11 @@ create_caddyfile() {
     }
 }
 
-# Deployer dashboard
 d.$DEPLOYER_DOMAIN {
     reverse_proxy localhost:3000
 }
 
-# On-demand TLS for app subdomains (no wildcard cert needed)
-https://*.$DEPLOYER_DOMAIN {
+:443 {
     tls {
         on_demand
     }
