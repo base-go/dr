@@ -1,0 +1,440 @@
+#!/bin/bash
+set -e
+
+# Deployer Install Script
+# Usage: curl -fsSL https://raw.githubusercontent.com/base-go/dr/main/install.sh | sudo bash
+# Or with domain: DEPLOYER_DOMAIN=example.com curl -fsSL ... | sudo bash
+
+DEPLOYER_VERSION="${DEPLOYER_VERSION:-latest}"
+DEPLOYER_DIR="${DEPLOYER_DIR:-/opt/deployer}"
+DEPLOYER_USER="${DEPLOYER_USER:-deployer}"
+DEPLOYER_DOMAIN="${DEPLOYER_DOMAIN:-}"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+log() { echo -e "${GREEN}[+]${NC} $1"; }
+warn() { echo -e "${YELLOW}[!]${NC} $1"; }
+error() { echo -e "${RED}[x]${NC} $1"; exit 1; }
+ask() { echo -e "${BLUE}[?]${NC} $1"; }
+
+# Check if running as root
+if [ "$EUID" -ne 0 ]; then
+    error "Please run as root: curl -fsSL ... | sudo bash"
+fi
+
+# Detect OS
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    OS=$ID
+else
+    error "Cannot detect OS"
+fi
+
+log "Detected OS: $OS"
+
+# Interactive domain setup if not provided
+setup_domain() {
+    if [ -n "$DEPLOYER_DOMAIN" ]; then
+        log "Using domain: $DEPLOYER_DOMAIN"
+        return
+    fi
+
+    echo ""
+    echo -e "${BLUE}========================================${NC}"
+    echo -e "${BLUE}         Domain Configuration          ${NC}"
+    echo -e "${BLUE}========================================${NC}"
+    echo ""
+    echo "Deployer needs a root domain for your apps."
+    echo "Apps will be accessible at: appname.yourdomain.com"
+    echo ""
+    echo "Example: If you enter 'common.al', your apps will be:"
+    echo "  - nginx.common.al"
+    echo "  - ghost.common.al"
+    echo "  - myapp.common.al"
+    echo ""
+    echo "Prerequisites:"
+    echo "  1. You own this domain"
+    echo "  2. DNS wildcard A record: *.yourdomain.com -> this server's IP"
+    echo ""
+
+    # Check if stdin is a terminal (interactive mode)
+    if [ -t 0 ]; then
+        ask "Enter your root domain (e.g., deploy.example.com):"
+        read -r DEPLOYER_DOMAIN
+
+        if [ -z "$DEPLOYER_DOMAIN" ]; then
+            warn "No domain entered. Apps will use IP:port access only."
+            warn "You can configure a domain later in: $DEPLOYER_DIR/config/deployer.yaml"
+        else
+            log "Domain set to: $DEPLOYER_DOMAIN"
+
+            # Ask for email for SSL certificates
+            ask "Enter email for SSL certificates (optional, press Enter to skip):"
+            read -r DEPLOYER_EMAIL
+
+            if [ -n "$DEPLOYER_EMAIL" ]; then
+                log "Email set to: $DEPLOYER_EMAIL"
+            fi
+        fi
+    else
+        warn "Non-interactive mode. No domain configured."
+        warn "You can set domain with: DEPLOYER_DOMAIN=example.com curl -fsSL ... | bash"
+        warn "Or configure later in: $DEPLOYER_DIR/config/deployer.yaml"
+    fi
+    echo ""
+}
+
+# Install dependencies based on OS
+install_deps() {
+    log "Installing dependencies..."
+
+    case $OS in
+        ubuntu|debian)
+            apt-get update -qq
+            apt-get install -y -qq curl wget podman sqlite3 ca-certificates
+            ;;
+        fedora|centos|rhel|rocky|alma)
+            dnf install -y podman sqlite curl wget ca-certificates
+            ;;
+        arch|manjaro)
+            pacman -Sy --noconfirm podman sqlite curl wget
+            ;;
+        *)
+            error "Unsupported OS: $OS. Please install manually."
+            ;;
+    esac
+}
+
+# Install Caddy
+install_caddy() {
+    if command -v caddy &> /dev/null; then
+        log "Caddy already installed"
+        return
+    fi
+
+    log "Installing Caddy..."
+
+    case $OS in
+        ubuntu|debian)
+            apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https
+            curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+            curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
+            apt-get update -qq
+            apt-get install -y -qq caddy
+            ;;
+        fedora|centos|rhel|rocky|alma)
+            dnf install -y 'dnf-command(copr)'
+            dnf copr enable -y @caddy/caddy
+            dnf install -y caddy
+            ;;
+        arch|manjaro)
+            pacman -Sy --noconfirm caddy
+            ;;
+        *)
+            # Fallback: download binary
+            curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" -o /usr/local/bin/caddy
+            chmod +x /usr/local/bin/caddy
+            ;;
+    esac
+}
+
+# Create deployer user
+create_user() {
+    if id "$DEPLOYER_USER" &>/dev/null; then
+        log "User $DEPLOYER_USER already exists"
+    else
+        log "Creating user $DEPLOYER_USER..."
+        useradd -r -m -s /bin/bash "$DEPLOYER_USER"
+    fi
+
+    # Add to podman group if exists
+    usermod -aG podman "$DEPLOYER_USER" 2>/dev/null || true
+}
+
+# Download and install deployer
+install_deployer() {
+    log "Installing Deployer to $DEPLOYER_DIR..."
+
+    mkdir -p "$DEPLOYER_DIR"/{bin,config,data,logs}
+
+    # Detect architecture
+    ARCH=$(uname -m)
+    case $ARCH in
+        x86_64) ARCH="amd64" ;;
+        aarch64|arm64) ARCH="arm64" ;;
+        *) error "Unsupported architecture: $ARCH" ;;
+    esac
+
+    # Download deployer binary
+    if [ "$DEPLOYER_VERSION" = "latest" ]; then
+        DOWNLOAD_URL="https://github.com/base-go/dr/releases/latest/download/deployer-linux-$ARCH"
+    else
+        DOWNLOAD_URL="https://github.com/base-go/dr/releases/download/$DEPLOYER_VERSION/deployer-linux-$ARCH"
+    fi
+
+    log "Downloading from $DOWNLOAD_URL..."
+    curl -fsSL "$DOWNLOAD_URL" -o "$DEPLOYER_DIR/bin/deployer" || {
+        warn "Binary not found, building from source..."
+        build_from_source
+    }
+
+    chmod +x "$DEPLOYER_DIR/bin/deployer"
+    ln -sf "$DEPLOYER_DIR/bin/deployer" /usr/local/bin/deployer
+}
+
+# Build from source if binary not available
+build_from_source() {
+    log "Building from source..."
+
+    # Install Go if not present
+    if ! command -v go &> /dev/null; then
+        log "Installing Go..."
+        curl -fsSL "https://go.dev/dl/go1.22.0.linux-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar -C /usr/local -xzf -
+        export PATH=$PATH:/usr/local/go/bin
+    fi
+
+    # Clone and build
+    TMPDIR=$(mktemp -d)
+    git clone --depth 1 https://github.com/base-go/deployer.git "$TMPDIR"
+    cd "$TMPDIR"
+    go build -o "$DEPLOYER_DIR/bin/deployer" ./cmd/deployer
+    cd -
+    rm -rf "$TMPDIR"
+}
+
+# Create configuration
+create_config() {
+    log "Creating configuration..."
+
+    # Determine email for SSL
+    local ssl_email="${DEPLOYER_EMAIL:-}"
+    if [ -z "$ssl_email" ] && [ -n "$DEPLOYER_DOMAIN" ]; then
+        ssl_email="admin@$DEPLOYER_DOMAIN"
+    fi
+
+    if [ -n "$DEPLOYER_DOMAIN" ]; then
+        # Production mode with real domain
+        cat > "$DEPLOYER_DIR/config/deployer.yaml" <<EOF
+server:
+  api_port: 3000
+  host: 0.0.0.0
+
+podman:
+  socket: /run/user/$(id -u $DEPLOYER_USER)/podman/podman.sock
+
+caddy:
+  admin_url: http://localhost:2019
+
+database:
+  path: $DEPLOYER_DIR/data/deployer.db
+
+domain:
+  base: $DEPLOYER_DOMAIN
+  wildcard: true
+  email: $ssl_email
+EOF
+    else
+        # No domain mode - access via IP:port
+        cat > "$DEPLOYER_DIR/config/deployer.yaml" <<EOF
+server:
+  api_port: 3000
+  host: 0.0.0.0
+
+podman:
+  socket: /run/user/$(id -u $DEPLOYER_USER)/podman/podman.sock
+
+caddy:
+  admin_url: http://localhost:2019
+
+database:
+  path: $DEPLOYER_DIR/data/deployer.db
+
+domain:
+  suffix: ""
+  wildcard: false
+EOF
+    fi
+}
+
+# Create Caddyfile
+create_caddyfile() {
+    log "Creating Caddyfile..."
+
+    # Use provided email or default
+    local ssl_email="${DEPLOYER_EMAIL:-admin@$DEPLOYER_DOMAIN}"
+
+    if [ -n "$DEPLOYER_DOMAIN" ]; then
+        cat > "$DEPLOYER_DIR/config/Caddyfile" <<EOF
+{
+    admin localhost:2019
+    email $ssl_email
+}
+
+# Main dashboard
+$DEPLOYER_DOMAIN {
+    reverse_proxy localhost:3000
+}
+
+# Wildcard for all apps
+*.$DEPLOYER_DOMAIN {
+    reverse_proxy localhost:3000
+}
+EOF
+    else
+        cat > "$DEPLOYER_DIR/config/Caddyfile" <<EOF
+{
+    admin localhost:2019
+    auto_https off
+}
+
+# Dashboard accessible via IP:80
+:80 {
+    reverse_proxy localhost:3000
+}
+EOF
+    fi
+}
+
+# Create systemd services
+create_services() {
+    log "Creating systemd services..."
+
+    # Deployer service
+    cat > /etc/systemd/system/deployer.service <<EOF
+[Unit]
+Description=Deployer PaaS
+After=network.target podman.socket
+
+[Service]
+Type=simple
+User=$DEPLOYER_USER
+Group=$DEPLOYER_USER
+WorkingDirectory=$DEPLOYER_DIR
+ExecStart=$DEPLOYER_DIR/bin/deployer
+Restart=always
+RestartSec=5
+Environment=DEPLOYER_CONFIG=$DEPLOYER_DIR/config/deployer.yaml
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # Caddy service (if not already managed by system)
+    if [ ! -f /etc/systemd/system/caddy.service ] && [ ! -f /lib/systemd/system/caddy.service ]; then
+        cat > /etc/systemd/system/caddy.service <<EOF
+[Unit]
+Description=Caddy Web Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/caddy run --config $DEPLOYER_DIR/config/Caddyfile
+ExecReload=/usr/bin/caddy reload --config $DEPLOYER_DIR/config/Caddyfile
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    fi
+
+    # Enable podman socket for user
+    log "Enabling Podman socket for $DEPLOYER_USER..."
+    sudo -u "$DEPLOYER_USER" systemctl --user enable podman.socket 2>/dev/null || true
+    sudo -u "$DEPLOYER_USER" systemctl --user start podman.socket 2>/dev/null || true
+    loginctl enable-linger "$DEPLOYER_USER" 2>/dev/null || true
+
+    systemctl daemon-reload
+}
+
+# Set permissions
+set_permissions() {
+    log "Setting permissions..."
+    chown -R "$DEPLOYER_USER:$DEPLOYER_USER" "$DEPLOYER_DIR"
+    chmod 750 "$DEPLOYER_DIR"
+    chmod 640 "$DEPLOYER_DIR/config/"*
+}
+
+# Start services
+start_services() {
+    log "Starting services..."
+
+    systemctl enable caddy
+    systemctl start caddy
+
+    systemctl enable deployer
+    systemctl start deployer
+}
+
+# Print success message
+print_success() {
+    local server_ip=$(hostname -I | awk '{print $1}')
+
+    echo ""
+    echo -e "${GREEN}========================================${NC}"
+    echo -e "${GREEN}  Deployer installed successfully!${NC}"
+    echo -e "${GREEN}========================================${NC}"
+    echo ""
+
+    if [ -n "$DEPLOYER_DOMAIN" ]; then
+        echo "  Dashboard: https://$DEPLOYER_DOMAIN"
+        echo "  Apps:      https://appname.$DEPLOYER_DOMAIN"
+        echo ""
+        echo "  SSL certificates will be automatically obtained from Let's Encrypt."
+    else
+        echo "  Dashboard: http://$server_ip:3000"
+        echo ""
+        echo -e "${YELLOW}  Note: No domain configured.${NC}"
+        echo "  Apps will be accessible via direct port mapping only."
+        echo ""
+        echo "  To add a domain later, edit: $DEPLOYER_DIR/config/deployer.yaml"
+        echo "  And set: domain.base: yourdomain.com"
+    fi
+
+    echo ""
+    echo "  Config:    $DEPLOYER_DIR/config/deployer.yaml"
+    echo "  Logs:      journalctl -u deployer -f"
+    echo ""
+    echo "  Commands:"
+    echo "    systemctl status deployer   # Check status"
+    echo "    systemctl restart deployer  # Restart"
+    echo "    journalctl -u deployer -f   # View logs"
+    echo "    deployer update             # Update to latest version"
+    echo ""
+}
+
+# Main
+main() {
+    echo ""
+    echo "  ____             _                       "
+    echo " |  _ \  ___ _ __ | | ___  _   _  ___ _ __ "
+    echo " | | | |/ _ \ '_ \| |/ _ \| | | |/ _ \ '__|"
+    echo " | |_| |  __/ |_) | | (_) | |_| |  __/ |   "
+    echo " |____/ \___| .__/|_|\___/ \__, |\___|_|   "
+    echo "            |_|            |___/           "
+    echo ""
+    echo " Self-hosted PaaS with Podman & Caddy"
+    echo ""
+
+    # Ask for domain configuration first
+    setup_domain
+
+    install_deps
+    install_caddy
+    create_user
+    install_deployer
+    create_config
+    create_caddyfile
+    create_services
+    set_permissions
+    start_services
+    print_success
+}
+
+main "$@"
