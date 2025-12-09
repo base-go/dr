@@ -93,9 +93,11 @@ setup_domain() {
             log "Admin password generated"
         fi
     else
-        warn "Non-interactive mode. No domain configured."
-        warn "You can set domain with: DEPLOYER_DOMAIN=example.com curl -fsSL ... | bash"
-        warn "Or configure later in: $DEPLOYER_DIR/config/deployer.yaml"
+        warn "Non-interactive mode detected."
+        warn "To configure domain, use: DEPLOYER_DOMAIN=example.com curl -fsSL ... | bash"
+        warn ""
+        warn "Proceeding without domain. Dashboard will be accessible via IP:port."
+        warn "You can configure domain later in: $DEPLOYER_DIR/config/deployer.yaml"
     fi
     echo ""
 }
