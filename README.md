@@ -5,7 +5,7 @@ Self-hosted PaaS with Podman and Caddy. Deploy apps with automatic SSL.
 ## Quick Install
 
 ```bash
-DEPLOYER_DOMAIN=example.com curl -fsSL https://raw.githubusercontent.com/base-go/dr/main/install.sh | sudo bash
+sudo DEPLOYER_DOMAIN=example.com bash -c "$(curl -fsSL https://raw.githubusercontent.com/base-go/dr/main/install.sh)"
 ```
 
 This will:
@@ -30,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/base-go/dr/main/upgrade.sh | sudo b
 
 ## Current Version
 
-**v0.1.6**
+**v0.1.9**
 
 ## Features
 
