@@ -180,7 +180,9 @@ create_user() {
 install_deployer() {
     log "Installing Deployer to $DEPLOYER_DIR..."
 
+    # Create directories with proper permissions
     mkdir -p "$DEPLOYER_DIR"/{bin,config,data,logs}
+    chmod 755 "$DEPLOYER_DIR" "$DEPLOYER_DIR/bin"
 
     # Detect architecture
     ARCH=$(uname -m)
@@ -190,6 +192,10 @@ install_deployer() {
         *) error "Unsupported architecture: $ARCH" ;;
     esac
 
+    # Get latest version info
+    LATEST_VERSION=$(curl -fsSL "https://api.github.com/repos/base-go/dr/releases/latest" 2>/dev/null | grep '"tag_name"' | sed 's/.*"v\(.*\)".*/\1/' || echo "unknown")
+    log "Installing version: $LATEST_VERSION"
+
     # Download deployer binary
     if [ "$DEPLOYER_VERSION" = "latest" ]; then
         DOWNLOAD_URL="https://github.com/base-go/dr/releases/latest/download/deployer-linux-$ARCH"
@@ -198,6 +204,7 @@ install_deployer() {
     fi
 
     log "Downloading from $DOWNLOAD_URL..."
+    rm -f "$DEPLOYER_DIR/bin/deployer"
     curl -fsSL "$DOWNLOAD_URL" -o "$DEPLOYER_DIR/bin/deployer" || {
         warn "Binary not found, building from source..."
         build_from_source
