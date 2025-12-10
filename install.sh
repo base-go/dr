@@ -174,6 +174,16 @@ create_user() {
 
     # Add to podman group if exists
     usermod -aG podman "$DEPLOYER_USER" 2>/dev/null || true
+
+    # Configure subuid/subgid for rootless Podman
+    # This is required for Podman to map UIDs/GIDs in containers
+    log "Configuring subuid/subgid for rootless Podman..."
+    if ! grep -q "^$DEPLOYER_USER:" /etc/subuid 2>/dev/null; then
+        echo "$DEPLOYER_USER:100000:65536" >> /etc/subuid
+    fi
+    if ! grep -q "^$DEPLOYER_USER:" /etc/subgid 2>/dev/null; then
+        echo "$DEPLOYER_USER:100000:65536" >> /etc/subgid
+    fi
 }
 
 # Download and install deployer
@@ -262,7 +272,7 @@ auth:
   password_hash: $password_hash
 
 podman:
-  socket: /run/user/$(id -u $DEPLOYER_USER)/podman/podman.sock
+  socket: /run/podman/podman.sock
 
 caddy:
   admin_url: http://localhost:2019
@@ -283,7 +293,7 @@ server:
   host: 0.0.0.0
 
 podman:
-  socket: /run/user/$(id -u $DEPLOYER_USER)/podman/podman.sock
+  socket: /run/podman/podman.sock
 
 caddy:
   admin_url: http://localhost:2019
@@ -348,6 +358,10 @@ EOF
 create_services() {
     log "Creating systemd services..."
 
+    # Run podman system migrate for the deployer user (required after subuid/subgid changes)
+    log "Running podman system migrate..."
+    sudo -u "$DEPLOYER_USER" sh -c "cd /tmp && podman system migrate" 2>/dev/null || true
+
     # Deployer service
     cat > /etc/systemd/system/deployer.service <<EOF
 [Unit]
@@ -363,6 +377,7 @@ ExecStart=$DEPLOYER_DIR/bin/deployer
 Restart=always
 RestartSec=5
 Environment=DEPLOYER_CONFIG=$DEPLOYER_DIR/config/deployer.yaml
+Environment=PODMAN_SOCKET=/run/podman/podman.sock
 
 [Install]
 WantedBy=multi-user.target
@@ -396,11 +411,21 @@ WantedBy=multi-user.target
 EOF
     fi
 
-    # Enable podman socket for user
-    log "Enabling Podman socket for $DEPLOYER_USER..."
+    # Enable system-wide podman socket (preferred for server use)
+    log "Enabling Podman socket..."
+    systemctl enable podman.socket 2>/dev/null || true
+    systemctl start podman.socket 2>/dev/null || true
+
+    # Also enable user-level podman socket as fallback
     sudo -u "$DEPLOYER_USER" systemctl --user enable podman.socket 2>/dev/null || true
     sudo -u "$DEPLOYER_USER" systemctl --user start podman.socket 2>/dev/null || true
     loginctl enable-linger "$DEPLOYER_USER" 2>/dev/null || true
+
+    # Add deployer user to podman socket group for access
+    if [ -S /run/podman/podman.sock ]; then
+        chmod 660 /run/podman/podman.sock 2>/dev/null || true
+        chgrp "$DEPLOYER_USER" /run/podman/podman.sock 2>/dev/null || true
+    fi
 
     systemctl daemon-reload
 }
@@ -408,9 +433,14 @@ EOF
 # Set permissions
 set_permissions() {
     log "Setting permissions..."
+
+    # Create builds directory for source deployments
+    mkdir -p "$DEPLOYER_DIR/builds"
+
     chown -R "$DEPLOYER_USER:$DEPLOYER_USER" "$DEPLOYER_DIR"
     chmod 750 "$DEPLOYER_DIR"
     chmod 640 "$DEPLOYER_DIR/config/"*
+    chmod 750 "$DEPLOYER_DIR/builds"
 }
 
 # Start services
