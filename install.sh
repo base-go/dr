@@ -313,6 +313,9 @@ create_caddyfile() {
 }
 
 d.$DEPLOYER_DOMAIN {
+    tls {
+        on_demand
+    }
     reverse_proxy localhost:3000
 }
 
