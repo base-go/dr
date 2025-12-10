@@ -11,7 +11,7 @@ curl -fsSL https://raw.githubusercontent.com/base-go/dr/main/install.sh | sudo D
 This will:
 - Install Podman and Caddy
 - Set up dashboard at `d.example.com`
-- Enable wildcard SSL for `*.example.com`
+- Enable automatic SSL for all subdomains
 - Generate admin password (shown after install)
 
 ### Prerequisites
@@ -30,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/base-go/dr/main/upgrade.sh | sudo b
 
 ## Current Version
 
-**v0.1.9**
+**v0.1.10**
 
 ## Features
 
