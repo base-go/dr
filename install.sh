@@ -180,8 +180,9 @@ create_user() {
 install_deployer() {
     log "Installing Deployer to $DEPLOYER_DIR..."
 
-    # Create directories with proper permissions
+    # Create directories with proper permissions (as root)
     mkdir -p "$DEPLOYER_DIR"/{bin,config,data,logs}
+    chown -R root:root "$DEPLOYER_DIR/bin"
     chmod 755 "$DEPLOYER_DIR" "$DEPLOYER_DIR/bin"
 
     # Detect architecture
