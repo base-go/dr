@@ -93,11 +93,23 @@ setup_domain() {
             log "Admin password generated"
         fi
     else
-        warn "Non-interactive mode detected."
-        warn "To configure domain, use: DEPLOYER_DOMAIN=example.com curl -fsSL ... | bash"
-        warn ""
-        warn "Proceeding without domain. Dashboard will be accessible via IP:port."
-        warn "You can configure domain later in: $DEPLOYER_DIR/config/deployer.yaml"
+        # Non-interactive but domain provided via env var
+        if [ -n "$DEPLOYER_DOMAIN" ]; then
+            log "Using domain from environment: $DEPLOYER_DOMAIN"
+            log "Dashboard will be at: d.$DEPLOYER_DOMAIN"
+
+            # Generate random password if not provided
+            if [ -z "$DEPLOYER_PASSWORD" ]; then
+                DEPLOYER_PASSWORD=$(openssl rand -base64 12 | tr -d '/+=' | head -c 16)
+            fi
+            log "Admin password generated"
+        else
+            warn "Non-interactive mode detected."
+            warn "To configure domain, use: DEPLOYER_DOMAIN=example.com curl -fsSL ... | bash"
+            warn ""
+            warn "Proceeding without domain. Dashboard will be accessible via IP:port."
+            warn "You can configure domain later in: $DEPLOYER_DIR/config/deployer.yaml"
+        fi
     fi
     echo ""
 }
