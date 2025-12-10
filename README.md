@@ -30,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/base-go/dr/main/upgrade.sh | sudo b
 
 ## Current Version
 
-**v0.1.11**
+**v0.1.12**
 
 ## Features
 
