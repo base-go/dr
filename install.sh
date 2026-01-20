@@ -29,7 +29,9 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 # Detect OS
-if [ -f /etc/os-release ]; then
+if [ "$(uname)" = "Darwin" ]; then
+    OS="macos"
+elif [ -f /etc/os-release ]; then
     . /etc/os-release
     OS=$ID
 else
@@ -114,6 +116,19 @@ install_deps() {
     log "Installing dependencies..."
 
     case $OS in
+        macos)
+            # On macOS, run brew as the original user (not root)
+            local brew_user="${SUDO_USER:-$(whoami)}"
+            local brew_path="/opt/homebrew/bin/brew"
+            [ ! -f "$brew_path" ] && brew_path="/usr/local/bin/brew"
+
+            if [ ! -f "$brew_path" ]; then
+                error "Homebrew not found. Install from https://brew.sh"
+            fi
+
+            log "Installing podman via Homebrew (as $brew_user)..."
+            sudo -u "$brew_user" HOMEBREW_NO_AUTO_UPDATE=1 "$brew_path" install podman 2>/dev/null || true
+            ;;
         ubuntu|debian)
             apt-get update -qq
             apt-get install -y -qq curl wget podman sqlite3 ca-certificates
@@ -140,6 +155,13 @@ install_caddy() {
     log "Installing Caddy..."
 
     case $OS in
+        macos)
+            local brew_user="${SUDO_USER:-$(whoami)}"
+            local brew_path="/opt/homebrew/bin/brew"
+            [ ! -f "$brew_path" ] && brew_path="/usr/local/bin/brew"
+            log "Installing caddy via Homebrew (as $brew_user)..."
+            sudo -u "$brew_user" HOMEBREW_NO_AUTO_UPDATE=1 "$brew_path" install caddy 2>/dev/null || true
+            ;;
         ubuntu|debian)
             apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https
             curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
@@ -165,6 +187,13 @@ install_caddy() {
 
 # Create deployer user
 create_user() {
+    # On macOS, use the user who ran sudo
+    if [ "$OS" = "macos" ]; then
+        DEPLOYER_USER="${SUDO_USER:-$(whoami)}"
+        log "Using user: $DEPLOYER_USER"
+        return
+    fi
+
     if id "$DEPLOYER_USER" &>/dev/null; then
         log "User $DEPLOYER_USER already exists"
     else
@@ -188,14 +217,18 @@ create_user() {
 
 # Download and install deployer
 install_deployer() {
+    # Set appropriate install dir for macOS
+    if [ "$OS" = "macos" ]; then
+        DEPLOYER_DIR="/usr/local/deployer"
+    fi
+
     log "Installing Deployer to $DEPLOYER_DIR..."
 
     # Create directories with proper permissions (as root)
     mkdir -p "$DEPLOYER_DIR"/{bin,config,data,logs}
-    chown -R root:root "$DEPLOYER_DIR/bin"
     chmod 755 "$DEPLOYER_DIR" "$DEPLOYER_DIR/bin"
 
-    # Detect architecture
+    # Detect architecture and OS
     ARCH=$(uname -m)
     case $ARCH in
         x86_64) ARCH="amd64" ;;
@@ -203,26 +236,33 @@ install_deployer() {
         *) error "Unsupported architecture: $ARCH" ;;
     esac
 
+    # Determine OS for download
+    if [ "$OS" = "macos" ]; then
+        DOWNLOAD_OS="darwin"
+    else
+        DOWNLOAD_OS="linux"
+    fi
+
     # Get latest version info
     LATEST_VERSION=$(curl -fsSL "https://api.github.com/repos/base-go/dr/releases/latest" 2>/dev/null | grep '"tag_name"' | sed 's/.*"v\(.*\)".*/\1/' || echo "unknown")
     log "Installing version: $LATEST_VERSION"
 
     # Download deployer binary
     if [ "$DEPLOYER_VERSION" = "latest" ]; then
-        DOWNLOAD_URL="https://github.com/base-go/dr/releases/latest/download/deployer-linux-$ARCH"
+        DOWNLOAD_URL="https://github.com/base-go/dr/releases/latest/download/deployerd-$DOWNLOAD_OS-$ARCH"
     else
-        DOWNLOAD_URL="https://github.com/base-go/dr/releases/download/$DEPLOYER_VERSION/deployer-linux-$ARCH"
+        DOWNLOAD_URL="https://github.com/base-go/dr/releases/download/$DEPLOYER_VERSION/deployerd-$DOWNLOAD_OS-$ARCH"
     fi
 
     log "Downloading from $DOWNLOAD_URL..."
-    rm -f "$DEPLOYER_DIR/bin/deployer"
-    curl -fsSL "$DOWNLOAD_URL" -o "$DEPLOYER_DIR/bin/deployer" || {
+    rm -f "$DEPLOYER_DIR/bin/deployerd"
+    curl -fsSL "$DOWNLOAD_URL" -o "$DEPLOYER_DIR/bin/deployerd" || {
         warn "Binary not found, building from source..."
         build_from_source
     }
 
-    chmod +x "$DEPLOYER_DIR/bin/deployer"
-    ln -sf "$DEPLOYER_DIR/bin/deployer" /usr/local/bin/deployer
+    chmod +x "$DEPLOYER_DIR/bin/deployerd"
+    ln -sf "$DEPLOYER_DIR/bin/deployerd" /usr/local/bin/deployerd
 }
 
 # Build from source if binary not available
@@ -354,8 +394,13 @@ EOF
     fi
 }
 
-# Create systemd services
+# Create services (systemd on Linux, launchd on macOS)
 create_services() {
+    if [ "$OS" = "macos" ]; then
+        create_macos_services
+        return
+    fi
+
     log "Creating systemd services..."
 
     # Run podman system migrate for the deployer user (required after subuid/subgid changes)
@@ -373,7 +418,7 @@ Type=simple
 User=$DEPLOYER_USER
 Group=$DEPLOYER_USER
 WorkingDirectory=$DEPLOYER_DIR
-ExecStart=$DEPLOYER_DIR/bin/deployer
+ExecStart=$DEPLOYER_DIR/bin/deployerd
 Restart=always
 RestartSec=5
 Environment=DEPLOYER_CONFIG=$DEPLOYER_DIR/config/deployer.yaml
@@ -430,6 +475,100 @@ EOF
     systemctl daemon-reload
 }
 
+# Create macOS launchd services
+create_macos_services() {
+    log "Setting up macOS services..."
+
+    # Initialize podman machine if not exists
+    log "Initializing Podman machine..."
+    local brew_path="/opt/homebrew/bin"
+    [ ! -d "$brew_path" ] && brew_path="/usr/local/bin"
+    sudo -u "$DEPLOYER_USER" "$brew_path/podman" machine init 2>/dev/null || true
+    sudo -u "$DEPLOYER_USER" "$brew_path/podman" machine start 2>/dev/null || true
+
+    # Get user's home directory
+    local USER_HOME=$(eval echo ~$DEPLOYER_USER)
+
+    # Create symlink for podman socket (macOS puts it in /var/folders/...)
+    log "Setting up Podman socket symlink..."
+    local SOCKET_DIR="$USER_HOME/.local/share/containers/podman/machine"
+    mkdir -p "$SOCKET_DIR"
+    # Find the actual socket location
+    local ACTUAL_SOCKET=$(find /var/folders -name "podman-machine-default-api.sock" 2>/dev/null | head -1)
+    if [ -n "$ACTUAL_SOCKET" ]; then
+        ln -sf "$ACTUAL_SOCKET" "$SOCKET_DIR/podman.sock"
+        chown -R "$DEPLOYER_USER:staff" "$USER_HOME/.local/share/containers"
+    fi
+
+    # Create launchd plist for deployer
+    cat > /Library/LaunchDaemons/com.deployer.plist <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.deployer</string>
+    <key>UserName</key>
+    <string>$DEPLOYER_USER</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$DEPLOYER_DIR/bin/deployerd</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>$DEPLOYER_DIR</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>$USER_HOME</string>
+        <key>DEPLOYER_CONFIG</key>
+        <string>$DEPLOYER_DIR/config/deployer.yaml</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>$DEPLOYER_DIR/logs/deployer.log</string>
+    <key>StandardErrorPath</key>
+    <string>$DEPLOYER_DIR/logs/deployer.err</string>
+</dict>
+</plist>
+EOF
+
+    # Create launchd plist for caddy
+    local CADDY_PATH=$(which caddy || echo "/opt/homebrew/bin/caddy")
+    cat > /Library/LaunchDaemons/com.caddy.plist <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.caddy</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$CADDY_PATH</string>
+        <string>run</string>
+        <string>--config</string>
+        <string>$DEPLOYER_DIR/config/Caddyfile</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>$DEPLOYER_DIR/logs/caddy.log</string>
+    <key>StandardErrorPath</key>
+    <string>$DEPLOYER_DIR/logs/caddy.err</string>
+</dict>
+</plist>
+EOF
+
+    chmod 644 /Library/LaunchDaemons/com.deployer.plist
+    chmod 644 /Library/LaunchDaemons/com.caddy.plist
+}
+
 # Set permissions
 set_permissions() {
     log "Setting permissions..."
@@ -437,15 +576,26 @@ set_permissions() {
     # Create builds directory for source deployments
     mkdir -p "$DEPLOYER_DIR/builds"
 
-    chown -R "$DEPLOYER_USER:$DEPLOYER_USER" "$DEPLOYER_DIR"
+    # macOS uses 'staff' group, Linux uses same as username
+    if [ "$OS" = "macos" ]; then
+        chown -R "$DEPLOYER_USER:staff" "$DEPLOYER_DIR"
+    else
+        chown -R "$DEPLOYER_USER:$DEPLOYER_USER" "$DEPLOYER_DIR"
+    fi
     chmod 750 "$DEPLOYER_DIR"
-    chmod 640 "$DEPLOYER_DIR/config/"*
+    chmod 640 "$DEPLOYER_DIR/config/"* 2>/dev/null || true
     chmod 750 "$DEPLOYER_DIR/builds"
 }
 
 # Start services
 start_services() {
     log "Starting services..."
+
+    if [ "$OS" = "macos" ]; then
+        launchctl load /Library/LaunchDaemons/com.caddy.plist 2>/dev/null || true
+        launchctl load /Library/LaunchDaemons/com.deployer.plist 2>/dev/null || true
+        return
+    fi
 
     systemctl enable caddy
     systemctl start caddy
@@ -456,7 +606,12 @@ start_services() {
 
 # Print success message
 print_success() {
-    local server_ip=$(hostname -I | awk '{print $1}')
+    local server_ip
+    if [ "$OS" = "macos" ]; then
+        server_ip=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || echo "localhost")
+    else
+        server_ip=$(hostname -I | awk '{print $1}')
+    fi
 
     echo ""
     echo -e "${GREEN}========================================${NC}"
